@@ -8,6 +8,14 @@ metadata and the backend fallback mirror it.
 
 ## [Unreleased]
 
+**Highlights**
+
+- Groundwork for an optional VoiceStudio account, off by default and hidden in release builds
+
+### Added
+
+- Groundwork for an optional VoiceStudio account and settings sync, hidden in release builds until VoiceStudio Cloud launches: off by default, and account features and cloud sync can be switched off at setup or any time (#2931)
+
 ## [0.5.7] — 2026-10-17
 
 **VoiceStudio now runs on PCs without a GPU and recovers instead of giving up.** Voice cloning uses the speech-to-text model you installed from Model Catalogue, GPU-less computers get the small CPU PyTorch build, and slow or busy backends are no longer reported as failed.
