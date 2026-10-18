@@ -3,6 +3,13 @@ import VoiceStudioKit
 
 struct DictateView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.vsTheme) private var theme
+    @State private var preference: TaskLocation?
+    private var phoneModel: PhoneModel? { model.phone.preferred(.stream) }
+    private var localReady: Bool { phoneModel.map(model.phone.ready) ?? false }
+    private var route: TaskRoute { LocalRouting.route(preference: preference, installed: localReady, paired: model.connection.client != nil) }
+    @State private var holding = false
+    @State private var suppressTap = false
     @State private var text = ""
     @State private var transcript = DictationTranscript()
     @State private var previousText = ""
@@ -17,45 +24,72 @@ struct DictateView: View {
     @State private var stream = DictationStream()
     var body: some View {
         Page {
+            RunOnPicker(preference: $preference, task: "dictate", installed: localReady).disabled(listening || finalizing)
+            if route == .download { LocalDownloadPrompt(items: phoneModel.map { [$0] } ?? [], feature: "mobile.tabs.dictate") }
+            if route == .connect { NavigationLink(model.t("mobile.settings.connection")) { ConnectView() } }
             if checking { ProgressView(model.t("common.loading")) }
-            else if !ready { Text(model.t("mobile.dictate.not_ready", ["reason": reason])) }
-            Button(model.t(listening ? "common.stop" : "mobile.dictate.tap_to_start"), systemImage: listening ? "stop.fill" : "mic.fill") {
-                if listening { stop() } else { start() }
-            }.buttonStyle(VSButtonStyle(kind: .primary)).disabled(!ready || finalizing).accessibilityHint(model.t("mobile.dictate.hold_to_talk")).accessibilityIdentifier("dictate.record")
-            // The separate hold surface supports release-to-finish without competing with tap semantics.
-            Text(model.t("mobile.dictate.hold_to_talk")).frame(minHeight: 44).frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .onLongPressGesture(minimumDuration: 0.2, pressing: { pressed in
-                    if pressed && ready && !listening { start() }
-                    else if !pressed && listening { stop() }
-                }, perform: {})
-                .accessibilityAddTraits(.isButton).accessibilityAction { if listening { stop() } else { start() } }
-            if listening { Text(model.t("mobile.dictate.listening")) }
-            Text(text).frame(maxWidth: .infinity, alignment: .leading)
+            else if !ready && route == .computer {
+                Text(model.t("mobile.simple.connection_error"))
+                Button(model.t("mobile.simple.retry")) { Task { await readiness() } }
+            }
+            Text(text).frame(maxWidth: .infinity, minHeight: 160, alignment: .bottomLeading)
                 .textSelection(.enabled).accessibilityLabel(model.t("mobile.ios.transcript"))
-            Button(model.t("mobile.dictate.copy"), systemImage: "doc.on.doc") { UIPasteboard.general.string = text }.disabled(text.isEmpty)
-            ShareLink(item: text) { Label(model.t("mobile.speak.share"), systemImage: "square.and.arrow.up") }.disabled(text.isEmpty)
+            Button {
+                guard !suppressTap else { return }
+                if listening { stop() } else { start() }
+            } label: {
+                Image(systemName: listening ? "stop.fill" : "mic.fill")
+                    .font(.largeTitle).frame(width: 112, height: 112)
+                    .foregroundStyle(theme.color("messageActionForeground"))
+                    .background(theme.color("messageAction"), in: Circle())
+            }.buttonStyle(.plain).frame(maxWidth: .infinity, minHeight: 144)
+                .disabled(!ready || finalizing || model.phone.activeDub != nil)
+                .accessibilityLabel(model.t(listening ? "common.stop" : "mobile.simple.microphone"))
+                .accessibilityIdentifier("dictate.record")
+                .onLongPressGesture(minimumDuration: 0.2, pressing: { pressed in
+                    if !pressed && holding {
+                        holding = false; if listening { stop() }
+                        Task { try? await Task.sleep(for: .milliseconds(150)); suppressTap = false }
+                    }
+                }, perform: { holding = true; suppressTap = true; if !listening && ready { start() } })
         }.navigationTitle(model.t("mobile.tabs.dictate"))
-        .task { await readiness() }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack(spacing: VSTokens.spacingGap) {
+                Button(model.t("mobile.dictate.copy"), systemImage: "doc.on.doc") { UIPasteboard.general.string = text }
+                    .accessibilityIdentifier("dictate.copy")
+                ShareLink(item: text) { Label(model.t("mobile.speak.share"), systemImage: "square.and.arrow.up") }
+                    .accessibilityIdentifier("dictate.share")
+            }.labelStyle(.iconOnly).buttonStyle(VSButtonStyle(kind: .tertiary)).disabled(text.isEmpty)
+                .frame(maxWidth: .infinity).padding(Theme.compactInset).background(theme.color("canvas"))
+        }
+        .task { preference = model.phone.preference("dictate"); await model.phone.refresh(); await readiness() }
+        .onChange(of: preference) { _, _ in Task { await readiness() } }
+        .onChange(of: route) { _, _ in Task { await readiness() } }
         .refreshable { await readiness() }
         .onDisappear { capturing?.cancel(); receiving?.cancel(); audio.stop(); listening = false; finalizing = false; Task { await stream.close() } }
     }
     private func readiness() async {
         let scope = model.hostState.scopeID
+        let selectedRoute = route
         checking = true; defer { checking = false }
+        if route != .computer {
+            ready = route == .phone; reason = ready ? "" : model.t("mobile.local.model_required")
+            return
+        }
         do {
             let status = try await model.api().readiness()
-            guard scope == model.hostState.scopeID else { return }
+            guard scope == model.hostState.scopeID, selectedRoute == route else { return }
             ready = status.ready; reason = status.reason(l10n: model.l10n)
         }
         catch is CancellationError {}
-        catch let error as ClientError { guard scope == model.hostState.scopeID else { return }; ready = false; reason = model.t(error.key, error.params); await model.connection.handle(error) }
-        catch { ready = false; reason = model.t("mobile.errors.offline") }
+        catch let error as ClientError { guard scope == model.hostState.scopeID, selectedRoute == route else { return }; ready = false; reason = model.t(error.key, error.params); await model.connection.handle(error) }
+        catch { guard scope == model.hostState.scopeID, selectedRoute == route else { return }; ready = false; reason = model.t("mobile.errors.offline") }
     }
     private func start() {
         guard ready, !listening, !finalizing else { return }
         let scope = model.hostState.scopeID
         listening = true; previousText = text; transcript = DictationTranscript()
+        if route == .phone { startLocal(); return }
         capturing = Task {
             // Per session: a finished `receiving` from an earlier session must not count.
             var receiverCreated = false
@@ -84,6 +118,35 @@ struct DictateView: View {
                 audio.stop(); listening = false; finalizing = false; await stream.close()
                 if scope == model.hostState.scopeID { model.error = error as? ClientError ?? ClientError("mobile.errors.audio") }
             }
+        }
+    }
+    private func startLocal() {
+        capturing = Task {
+            defer { audio.stop(); listening = false; finalizing = false }
+            do {
+                guard let phoneModel, let engine = model.phone.engine else { throw ClientError("mobile.local.model_required") }
+                let bytes = try await audio.start()
+                guard listening, !Task.isCancelled else { audio.stop(); return }
+                let (chunks, continuation) = AsyncThrowingStream<PCMChunk, any Error>.makeStream(bufferingPolicy: .bufferingOldest(64))
+                let updates = try await engine.streamTranscribe(model: phoneModel, chunks: chunks, progress: { _ in })
+                receiving = Task {
+                    do {
+                        for try await update in updates {
+                            try Task.checkCancellation()
+                            text = [previousText, update.text].filter { !$0.isEmpty }.joined(separator: "\n")
+                        }
+                    } catch is CancellationError {} catch { model.error = error as? ClientError ?? ClientError("mobile.local.inference_failed") }
+                    audio.stop()
+                }
+                do {
+                    for try await chunk in bytes {
+                        try Task.checkCancellation()
+                        if case .dropped = continuation.yield(try PCMChunk(pcm16: chunk)) { throw ClientError("mobile.errors.audio") }
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error); throw error }
+                await receiving?.value
+            } catch is CancellationError {} catch { model.error = error as? ClientError ?? ClientError("mobile.errors.audio") }
         }
     }
     private func stop() { finalizing = true; audio.stop(); listening = false }

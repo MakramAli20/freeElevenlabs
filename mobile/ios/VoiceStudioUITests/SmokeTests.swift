@@ -1,6 +1,21 @@
 import XCTest
 
 final class SmokeTests: XCTestCase {
+    @MainActor func testUnpairedTabsAndModelDownloadPrompt() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-smoke", "-AppleLanguages", "(en)"]
+        app.launch()
+        XCTAssertTrue(app.buttons["consent.no"].waitForExistence(timeout: 10))
+        app.buttons["consent.no"].tap()
+        XCTAssertTrue(app.textViews["speak.text"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Open Models"].exists)
+        for tab in ["Voices", "Dub", "Dictate", "Settings"] {
+            app.tabBars.buttons[tab].tap()
+            XCTAssertTrue(app.navigationBars[tab].waitForExistence(timeout: 2))
+        }
+        XCTAssertTrue(app.buttons["settings.connect"].exists)
+    }
+
     @MainActor func testEveryTabRendersWhileHostInventoryIsLoading() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-smoke", "--ui-delayed-inventory", "-AppleLanguages", "(en)"]
@@ -56,6 +71,9 @@ final class SmokeTests: XCTestCase {
     @MainActor private func connect(_ app: XCUIApplication) {
         XCTAssertTrue(app.buttons["consent.no"].waitForExistence(timeout: 10))
         app.buttons["consent.no"].tap()
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons["settings.connect"].tap()
+        app.buttons["Enter address"].tap()
         let address = app.textFields["connect.url"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("http://127.0.0.1:3900")
@@ -70,7 +88,10 @@ final class SmokeTests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["consent.no"].waitForExistence(timeout: 10))
         app.buttons["consent.no"].tap()
-        XCTAssertTrue(app.tabBars.buttons["Connect"].exists)
+        XCTAssertTrue(app.tabBars.buttons["Speak"].exists)
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons["settings.connect"].tap()
+        app.buttons["Enter address"].tap()
         let address = app.textFields["connect.url"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("http://127.0.0.1:3900")
@@ -121,6 +142,9 @@ final class SmokeTests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["consent.no"].waitForExistence(timeout: 10))
         app.buttons["consent.no"].tap()
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons["settings.connect"].tap()
+        app.buttons["Enter address"].tap()
         let address = app.textFields["connect.url"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap(); address.typeText("http://127.0.0.1:3900")
@@ -147,7 +171,7 @@ final class SmokeTests: XCTestCase {
         rename.tap(); rename.typeText(" updated\n")
         assertKeyboardDismissed(app)
         app.buttons["Cancel"].tap()
-        app.buttons["Clone a voice"].tap()
+        app.buttons["voices.create"].tap()
         let name = app.textFields["voices.clone.name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap(); name.typeText("Sample voice")
